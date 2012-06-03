@@ -1,4 +1,4 @@
-mod_device_track
+mod_device_trace
 ================
 
-An apache module for tracking user devices.
+An apache module for tracing user devices.
