@@ -30,6 +30,7 @@
 #include "mod_dbd.h"
 #include "apr_strings.h"
 #include "apreq2/apreq_cookie.h"
+#include "apreq2/apreq_util.h"
 
 #define MOD_PREFIX "mod_device_trace:"
 
@@ -51,9 +52,36 @@ static void *create_device_trace_dir_config(apr_pool_t *p, char *dummy) {
     conf->device_token_name = "device_token";
     conf->device_session_name = "device_session";
     conf->hmac_key = "kagidesu";
-    conf->find_token_sql = "SELECT * FROM user_device WHERE token = %s";
+    conf->find_token_sql = "SELECT * FROM user_devices WHERE token = %s";
     conf->url_set_token = conf->url_start_session = NULL;
     return (void *)conf;
+}
+
+static void *merge_device_trace_dir_config(apr_pool_t *p, void *basev, void *overridesv) {
+  device_trace_dir_conf *newconf = (device_trace_dir_conf *)apr_palloc(p, sizeof(device_trace_dir_conf));
+  device_trace_dir_conf *base = basev;
+  device_trace_dir_conf *overrides = overridesv;
+
+  newconf->enabled = overrides->enabled;
+  if (overrides->device_token_name != NULL)
+    newconf->device_token_name = overrides->device_token_name;
+
+  if (overrides->device_session_name != NULL)
+    newconf->device_session_name = overrides->device_session_name;
+
+  if (overrides->hmac_key != NULL)
+    newconf->hmac_key = overrides->hmac_key;
+
+  if (overrides->find_token_sql != NULL)
+    newconf->find_token_sql = overrides->find_token_sql;
+
+  if (overrides->url_set_token != NULL)
+    newconf->url_set_token = overrides->url_set_token;
+
+  if (overrides->url_start_session != NULL)
+    newconf->url_start_session = overrides->url_start_session;
+
+  return newconf;
 }
 
 static const char *set_enabled(cmd_parms *parms, void *dconf, int flag)
@@ -140,9 +168,8 @@ static int check_device_token(request_rec *r)
     apr_dbd_row_t *row = NULL;
     apr_dbd_prepared_t *stmt = NULL;
     apr_table_t *cookie_jar = NULL;
-    char sql[] = "SELECT * FROM user_device WHERE token = %s";
     const char *device_token = NULL;
-    const char *device_session = NULL;
+    char *device_session = NULL;
 
     device_trace_dir_conf *conf = ap_get_module_config(r->per_dir_config,
 							 &device_trace_module);
@@ -158,10 +185,12 @@ static int check_device_token(request_rec *r)
     }
 
     if (cookie_jar != NULL) 
-	device_session = apr_table_get(cookie_jar, conf->device_session_name);
+	device_session = (char*)apr_table_get(cookie_jar, conf->device_session_name);
 
-    if (device_session != NULL && check_device_session(device_session, device_token, conf->hmac_key, r)) {
-	return OK;
+    if (device_session != NULL) {
+	apreq_unescape(device_session);
+	if (check_device_session(device_session, device_token, conf->hmac_key, r))
+	    return OK;
     }
 
     ap_dbd_t *dbd = ap_dbd_acquire(r);
@@ -197,7 +226,16 @@ static int check_device_token(request_rec *r)
 				    device_session, strlen(device_session));
 	    apr_table_addn(r->err_headers_out, "Set-Cookie", apreq_cookie_as_string(device_session_cookie, r->pool));
 	} else {
-	    apr_table_set(r->headers_out, "Location", conf->url_start_session);
+            apr_uri_t url;
+            char *back_url = NULL;
+            if (apr_uri_parse(r->pool, conf->url_start_session, &url) != APR_SUCCESS) {
+	        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+	    		      MOD_PREFIX "Can't parse DeviceTokenUrlStartSession");
+                return HTTP_INTERNAL_SERVER_ERROR;
+            }
+            back_url = apreq_escape(r->pool, r->uri, strlen(r->uri));
+            url.query = apr_pstrcat(r->pool,(url.query == NULL)?"" : url.query, "&back_url=", back_url, NULL);
+	    apr_table_set(r->headers_out, "Location", apr_uri_unparse(r->pool, &url, 0));
 	    return HTTP_MOVED_TEMPORARILY;
 	}
     } else {
@@ -232,7 +270,7 @@ static void register_hooks(apr_pool_t *p)
 module AP_MODULE_DECLARE_DATA device_trace_module = {
     STANDARD20_MODULE_STUFF, 
     create_device_trace_dir_config, /* create per-dir    config structures */
-    NULL,                  /* merge  per-dir    config structures */
+    merge_device_trace_dir_config,  /* merge  per-dir    config structures */
     NULL,                  /* create per-server config structures */
     NULL,                  /* merge  per-server config structures */
     device_trace_cmds,   /* table of config file commands       */
